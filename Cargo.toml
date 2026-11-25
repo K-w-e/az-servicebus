@@ -1,0 +1,36 @@
+[package]
+name = "az-servicebus"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI for browsing Azure Service Bus topics, subscriptions and messages"
+
+[dependencies]
+# TUI & Terminal
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures = "0.3"
+
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+
+# AMQP batch receive-and-delete (purge)
+azservicebus = { version = "0.25.1", default-features = false, features = ["rustls"] }
+
+# HTTP client & Auth (Management REST API e Peek)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+urlencoding = "2.1"
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# Data & Config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+directories = "5.0"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+lto = true
+strip = true
