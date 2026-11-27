@@ -53,6 +53,16 @@ impl ConnectionInfo {
         })
     }
 
+    /// REST base URL. The scheme defaults to `https`; `AZ_SERVICEBUS_SCHEME=http`
+    /// allows pointing the client at a local mock for offline demos and tests.
+    pub fn base_url(&self) -> String {
+        let scheme = std::env::var("AZ_SERVICEBUS_SCHEME")
+            .ok()
+            .filter(|s| s == "http" || s == "https")
+            .unwrap_or_else(|| "https".to_string());
+        format!("{scheme}://{}", self.host)
+    }
+
     /// SAS token scoped to the entire namespace (valid for all entities).
     pub fn sas_token(&self, ttl_secs: u64) -> Result<String> {
         let uri = format!("https://{}/", self.host).to_lowercase();
@@ -298,8 +308,8 @@ impl AzureClient {
         let mut skip = 0;
         loop {
             let url = format!(
-                "https://{}/$Resources/Topics?api-version={MGMT_API_VERSION}&$skip={skip}&$top={PAGE_SIZE}",
-                self.conn.host
+                "{}/$Resources/Topics?api-version={MGMT_API_VERSION}&$skip={skip}&$top={PAGE_SIZE}",
+                self.conn.base_url()
             );
             let entries = self.get_feed(&url).await?;
             let n = entries.len();
@@ -318,8 +328,8 @@ impl AzureClient {
         let mut skip = 0;
         loop {
             let url = format!(
-                "https://{}/{topic}/Subscriptions?api-version={MGMT_API_VERSION}&$skip={skip}&$top={PAGE_SIZE}",
-                self.conn.host
+                "{}/{topic}/Subscriptions?api-version={MGMT_API_VERSION}&$skip={skip}&$top={PAGE_SIZE}",
+                self.conn.base_url()
             );
             let entries = self.get_feed(&url).await?;
             let n = entries.len();
@@ -345,8 +355,8 @@ impl AzureClient {
 
     pub async fn get_subscription(&self, topic: &str, name: &str) -> Result<SubscriptionOptions> {
         let url = format!(
-            "https://{}/{topic}/Subscriptions/{name}?api-version={MGMT_API_VERSION}",
-            self.conn.host
+            "{}/{topic}/Subscriptions/{name}?api-version={MGMT_API_VERSION}",
+            self.conn.base_url()
         );
         let resp = self.send(Method::GET, &url).await?;
         let status = resp.status();
@@ -384,8 +394,8 @@ impl AzureClient {
 
     pub async fn delete_subscription(&self, topic: &str, name: &str) -> Result<()> {
         let url = format!(
-            "https://{}/{topic}/Subscriptions/{name}?api-version={MGMT_API_VERSION}",
-            self.conn.host
+            "{}/{topic}/Subscriptions/{name}?api-version={MGMT_API_VERSION}",
+            self.conn.base_url()
         );
         let resp = self.send(Method::DELETE, &url).await?;
         let status = resp.status();
@@ -411,8 +421,8 @@ impl AzureClient {
         update: bool,
     ) -> Result<()> {
         let url = format!(
-            "https://{}/{topic}/Subscriptions/{name}?api-version={MGMT_API_VERSION}",
-            self.conn.host
+            "{}/{topic}/Subscriptions/{name}?api-version={MGMT_API_VERSION}",
+            self.conn.base_url()
         );
         let body = build_subscription_xml(opts);
         let token = self.conn.sas_token(3600)?;
@@ -455,8 +465,8 @@ impl AzureClient {
     /// Peek-lock the first unlocked message. Returns `None` if the queue is empty.
     pub async fn peek_lock(&self, path: &str) -> Result<Option<LockedMessage>> {
         let url = format!(
-            "https://{}/{path}/messages/head?timeout=1&api-version={RUNTIME_API_VERSION}",
-            self.conn.host
+            "{}/{path}/messages/head?timeout=1&api-version={RUNTIME_API_VERSION}",
+            self.conn.base_url()
         );
         let resp = self.send(Method::POST, &url).await?;
         match resp.status() {

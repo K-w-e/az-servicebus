@@ -14,6 +14,14 @@ Terminal UI for browsing and managing Azure Service Bus topics, subscriptions, a
 - **Keyboard and mouse support**: full keyboard navigation plus clickable panels, list rows, and footer shortcuts. Toggle mouse capture with `m` when you need native terminal text selection.
 - **Non-blocking architecture**: network I/O, XML/JSON parsing, and AMQP operations run on a dedicated Tokio worker thread decoupled from the rendering loop.
 
+## Screenshots
+
+![Profiles](docs/screenshot-profiles.png)
+
+![Active messages](docs/screenshot-messages.png)
+
+![Dead-letter queue](docs/screenshot-dlq.png)
+
 ## Installation
 
 ### Prerequisites
