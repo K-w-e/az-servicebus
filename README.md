@@ -6,6 +6,7 @@ Terminal UI for browsing and managing Azure Service Bus topics, subscriptions, a
 
 - **Multi-profile connection management**: store multiple Azure Service Bus connection strings locally, switch profiles at runtime, and add or remove profiles from the UI.
 - **Topic and subscription browsing**: lists topics and subscriptions via the Azure Service Bus AtomPub REST Management API, displaying active and dead-letter message counts.
+- **Subscription management**: creates (`n`), edits (`e`), and deletes (`d` on the Subscriptions panel, with confirmation) subscriptions on the selected topic, configuring max delivery count, lock duration, default message TTL, dead-lettering on message expiration, and (on creation) name and session support.
 - **Non-destructive message peek**: inspects messages in either the Active queue or the Dead-Letter Queue (DLQ) without locking or removing them, with configurable batch size (`25` to `500` messages per peek).
 - **Message inspector**: displays `BrokerProperties`, custom `UserProperties`, and pretty-printed JSON payloads (or raw text when the body is not JSON).
 - **Single-message deletion**: deletes an individual message from the active queue or DLQ after an explicit confirmation prompt.
@@ -74,8 +75,10 @@ Profiles can also be created and removed directly from the in-app Profiles modal
 | `t` | Toggle between Active queue and Dead-Letter Queue (DLQ) |
 | `+` / `-` | Increase or decrease peek batch size by 25 (range 25-500) |
 | `r` | Refresh the focused panel |
+| `n` | Create a new subscription in the selected topic |
+| `e` | Edit the selected subscription |
 | `p` | Open Profiles modal |
-| `d` / `Delete` | Delete selected message (requires confirmation) |
+| `d` / `Delete` | Delete selected subscription (in Subscriptions panel) or selected message (in Messages / Detail panels) — requires confirmation |
 | `P` | Purge all available messages in the selected subscription or DLQ (requires confirmation) |
 | `m` | Toggle mouse capture (disable for native terminal text selection) |
 | `q` / `Ctrl+C` | Quit |
@@ -89,6 +92,16 @@ Profiles can also be created and removed directly from the in-app Profiles modal
 | `a` | Add a new profile (`Tab` switches fields, `Ctrl+U` clears field, `Enter` saves) |
 | `x` | Remove selected profile |
 | `Esc` | Close modal |
+
+### New / Edit Subscription modal
+
+| Key | Action |
+|---|---|
+| `Tab` / `Shift+Tab` / `Up` / `Down` | Move between editable fields (`Name` and `Requires session` are immutable when editing) |
+| `Space` | Toggle checkbox fields (`DLQ on msg expiration`, `Requires session`) |
+| `Ctrl+U` | Clear current text field |
+| `Enter` | Create or save subscription |
+| `Esc` | Cancel |
 
 ## Purge behavior
 

@@ -37,29 +37,29 @@ impl ConnectionInfo {
                 _ => {}
             }
         }
-        let endpoint = endpoint.context("Endpoint mancante nella connection string")?;
+        let endpoint = endpoint.context("Missing endpoint in connection string")?;
         let host = endpoint
             .trim_start_matches("sb://")
             .trim_start_matches("https://")
             .trim_end_matches('/')
             .to_string();
         if host.is_empty() {
-            bail!("Endpoint non valido");
+            bail!("Invalid endpoint");
         }
         Ok(Self {
             host,
-            key_name: key_name.context("SharedAccessKeyName mancante")?,
-            key: key.context("SharedAccessKey mancante")?,
+            key_name: key_name.context("Missing SharedAccessKeyName")?,
+            key: key.context("Missing SharedAccessKey")?,
         })
     }
 
-    /// Token SAS con scope sull'intero namespace (valido per tutte le entità).
+    /// SAS token scoped to the entire namespace (valid for all entities).
     pub fn sas_token(&self, ttl_secs: u64) -> Result<String> {
         let uri = format!("https://{}/", self.host).to_lowercase();
         let encoded_uri = urlencoding::encode(&uri).into_owned();
         let expiry = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + ttl_secs;
         let mut mac = Hmac::<Sha256>::new_from_slice(self.key.as_bytes())
-            .map_err(|e| anyhow!("Chiave SAS non valida: {e}"))?;
+            .map_err(|e| anyhow!("Invalid SAS key: {e}"))?;
         mac.update(format!("{encoded_uri}\n{expiry}").as_bytes());
         let sig = STANDARD.encode(mac.finalize().into_bytes());
         Ok(format!(
@@ -71,7 +71,7 @@ impl ConnectionInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Modelli
+// Models
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -79,6 +79,135 @@ pub struct SubscriptionInfo {
     pub name: String,
     pub active_count: u64,
     pub dead_letter_count: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubscriptionOptions {
+    pub lock_duration: Option<String>,
+    pub requires_session: bool,
+    pub default_message_ttl: Option<String>,
+    pub dead_lettering_on_message_expiration: bool,
+    pub dead_lettering_on_filter_evaluation_exceptions: Option<bool>,
+    pub max_delivery_count: Option<u32>,
+    pub enable_batched_operations: Option<bool>,
+    pub status: Option<String>,
+    pub forward_to: Option<String>,
+    pub user_metadata: Option<String>,
+    pub forward_dead_lettered_messages_to: Option<String>,
+    pub auto_delete_on_idle: Option<String>,
+}
+
+/// Validate a subscription name against Azure Service Bus naming rules.
+pub fn validate_subscription_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("Subscription name is required");
+    }
+    if name.len() > 50 {
+        bail!("Subscription name cannot exceed 50 characters");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        bail!("Subscription name can only contain letters, numbers, '.', '-', and '_'");
+    }
+    Ok(())
+}
+
+/// Build the AtomPub XML body for `PUT /{topic}/Subscriptions/{name}`.
+/// Element order matches the Azure Service Bus schema.
+pub fn build_subscription_xml(opts: &SubscriptionOptions) -> String {
+    let mut inner = String::new();
+    if let Some(d) = &opts.lock_duration {
+        inner.push_str(&format!("<LockDuration>{}</LockDuration>", xml_escape(d)));
+    }
+    inner.push_str(&format!(
+        "<RequiresSession>{}</RequiresSession>",
+        opts.requires_session
+    ));
+    if let Some(ttl) = &opts.default_message_ttl {
+        inner.push_str(&format!(
+            "<DefaultMessageTimeToLive>{}</DefaultMessageTimeToLive>",
+            xml_escape(ttl)
+        ));
+    }
+    inner.push_str(&format!(
+        "<DeadLetteringOnMessageExpiration>{}</DeadLetteringOnMessageExpiration>",
+        opts.dead_lettering_on_message_expiration
+    ));
+    if let Some(v) = opts.dead_lettering_on_filter_evaluation_exceptions {
+        inner.push_str(&format!(
+            "<DeadLetteringOnFilterEvaluationExceptions>{v}</DeadLetteringOnFilterEvaluationExceptions>"
+        ));
+    }
+    if let Some(max) = opts.max_delivery_count {
+        inner.push_str(&format!("<MaxDeliveryCount>{max}</MaxDeliveryCount>"));
+    }
+    if let Some(v) = opts.enable_batched_operations {
+        inner.push_str(&format!(
+            "<EnableBatchedOperations>{v}</EnableBatchedOperations>"
+        ));
+    }
+    if let Some(s) = &opts.status {
+        inner.push_str(&format!("<Status>{}</Status>", xml_escape(s)));
+    }
+    if let Some(f) = &opts.forward_to {
+        inner.push_str(&format!("<ForwardTo>{}</ForwardTo>", xml_escape(f)));
+    }
+    if let Some(m) = &opts.user_metadata {
+        inner.push_str(&format!("<UserMetadata>{}</UserMetadata>", xml_escape(m)));
+    }
+    if let Some(f) = &opts.forward_dead_lettered_messages_to {
+        inner.push_str(&format!(
+            "<ForwardDeadLetteredMessagesTo>{}</ForwardDeadLetteredMessagesTo>",
+            xml_escape(f)
+        ));
+    }
+    if let Some(a) = &opts.auto_delete_on_idle {
+        inner.push_str(&format!(
+            "<AutoDeleteOnIdle>{}</AutoDeleteOnIdle>",
+            xml_escape(a)
+        ));
+    }
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?><entry xmlns="http://www.w3.org/2005/Atom"><content type="application/xml"><SubscriptionDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">{inner}</SubscriptionDescription></content></entry>"#
+    )
+}
+
+/// Parse a single AtomPub `<entry>` response from `GET /{topic}/Subscriptions/{name}`.
+pub fn parse_subscription_options(xml: &str) -> Result<SubscriptionOptions> {
+    let entries = parse_feed(xml)?;
+    let entry = entries
+        .into_iter()
+        .next()
+        .context("Missing subscription entry in response")?;
+    let opt_str = |k: &str| entry.get(k).filter(|v| !v.is_empty()).cloned();
+    let opt_bool = |k: &str| entry.get(k).and_then(|v| v.parse::<bool>().ok());
+    Ok(SubscriptionOptions {
+        lock_duration: opt_str("LockDuration"),
+        requires_session: opt_bool("RequiresSession").unwrap_or(false),
+        default_message_ttl: opt_str("DefaultMessageTimeToLive"),
+        dead_lettering_on_message_expiration: opt_bool("DeadLetteringOnMessageExpiration")
+            .unwrap_or(false),
+        dead_lettering_on_filter_evaluation_exceptions: opt_bool(
+            "DeadLetteringOnFilterEvaluationExceptions",
+        ),
+        max_delivery_count: entry.get("MaxDeliveryCount").and_then(|v| v.parse().ok()),
+        enable_batched_operations: opt_bool("EnableBatchedOperations"),
+        status: opt_str("Status"),
+        forward_to: opt_str("ForwardTo"),
+        user_metadata: opt_str("UserMetadata"),
+        forward_dead_lettered_messages_to: opt_str("ForwardDeadLetteredMessagesTo"),
+        auto_delete_on_idle: opt_str("AutoDeleteOnIdle"),
+    })
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +223,7 @@ pub struct Message {
     pub body: String,
 }
 
-/// Messaggio ottenuto in peek-lock: `location` identifica il lock (unlock/delete).
+/// Message obtained via peek-lock: `location` identifies the lock (unlock/delete).
 #[derive(Debug, Clone)]
 pub struct LockedMessage {
     pub message: Message,
@@ -144,14 +273,14 @@ impl AzureClient {
             );
         } else {
             // Azure (front-end IIS) risponde 411 se manca `Content-Length`:
-            // hyper non lo invia per body vuoti, quindi va impostato esplicitamente.
+            // Hyper omits it for empty bodies, so it must be set explicitly.
             req = req
                 .header(reqwest::header::CONTENT_LENGTH, "0")
                 .body(Vec::<u8>::new());
         }
         req.send()
             .await
-            .with_context(|| format!("Richiesta {method} fallita"))
+            .with_context(|| format!("{method} request failed"))
     }
 
     async fn get_feed(&self, url: &str) -> Result<Vec<HashMap<String, String>>> {
@@ -214,7 +343,116 @@ impl AzureClient {
         Ok(out)
     }
 
-    /// Peek-lock del primo messaggio non bloccato. `None` se la coda è vuota.
+    pub async fn get_subscription(&self, topic: &str, name: &str) -> Result<SubscriptionOptions> {
+        let url = format!(
+            "https://{}/{topic}/Subscriptions/{name}?api-version={MGMT_API_VERSION}",
+            self.conn.host
+        );
+        let resp = self.send(Method::GET, &url).await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if status == StatusCode::NOT_FOUND {
+            bail!("Subscription '{name}' not found in topic '{topic}'");
+        }
+        if !status.is_success() {
+            bail!(
+                "Get subscription failed (HTTP {status}): {}",
+                error_detail(&text)
+            );
+        }
+        parse_subscription_options(&text)
+    }
+
+    pub async fn create_subscription(
+        &self,
+        topic: &str,
+        name: &str,
+        opts: &SubscriptionOptions,
+    ) -> Result<()> {
+        validate_subscription_name(name)?;
+        self.put_subscription(topic, name, opts, false).await
+    }
+
+    pub async fn update_subscription(
+        &self,
+        topic: &str,
+        name: &str,
+        opts: &SubscriptionOptions,
+    ) -> Result<()> {
+        self.put_subscription(topic, name, opts, true).await
+    }
+
+    pub async fn delete_subscription(&self, topic: &str, name: &str) -> Result<()> {
+        let url = format!(
+            "https://{}/{topic}/Subscriptions/{name}?api-version={MGMT_API_VERSION}",
+            self.conn.host
+        );
+        let resp = self.send(Method::DELETE, &url).await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            let detail = error_detail(&text);
+            if !detail.is_empty() {
+                bail!("Delete subscription failed (HTTP {status}): {detail}");
+            }
+            if status == StatusCode::NOT_FOUND {
+                bail!("Subscription '{name}' not found in topic '{topic}' (HTTP 404)");
+            }
+            bail!("Delete subscription failed (HTTP {status})");
+        }
+        Ok(())
+    }
+
+    async fn put_subscription(
+        &self,
+        topic: &str,
+        name: &str,
+        opts: &SubscriptionOptions,
+        update: bool,
+    ) -> Result<()> {
+        let url = format!(
+            "https://{}/{topic}/Subscriptions/{name}?api-version={MGMT_API_VERSION}",
+            self.conn.host
+        );
+        let body = build_subscription_xml(opts);
+        let token = self.conn.sas_token(3600)?;
+        let mut req = self
+            .http
+            .put(&url)
+            .header("Authorization", token)
+            .header(
+                "Content-Type",
+                "application/atom+xml;type=entry;charset=utf-8",
+            )
+            .header(reqwest::header::CONTENT_LENGTH, body.len().to_string());
+        if update {
+            req = req.header("If-Match", "*");
+        }
+        let op = if update { "Update" } else { "Create" };
+        let resp = req
+            .body(body)
+            .send()
+            .await
+            .with_context(|| format!("PUT {op} subscription request failed"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            let detail = error_detail(&text);
+            if !detail.is_empty() {
+                bail!("{op} subscription failed (HTTP {status}): {detail}");
+            }
+            if !update && status == StatusCode::CONFLICT {
+                bail!("Subscription '{name}' already exists in topic '{topic}' (HTTP 409)");
+            }
+            if update && status == StatusCode::NOT_FOUND {
+                bail!("Subscription '{name}' not found in topic '{topic}' (HTTP 404)");
+            }
+            bail!("{op} subscription failed (HTTP {status})");
+        }
+        Ok(())
+    }
+
+    /// Peek-lock the first unlocked message. Returns `None` if the queue is empty.
     pub async fn peek_lock(&self, path: &str) -> Result<Option<LockedMessage>> {
         let url = format!(
             "https://{}/{path}/messages/head?timeout=1&api-version={RUNTIME_API_VERSION}",
@@ -225,18 +463,18 @@ impl AzureClient {
             StatusCode::NO_CONTENT => Ok(None),
             StatusCode::CREATED | StatusCode::OK => parse_message(resp).await.map(Some),
             s => bail!(
-                "Peek fallito (HTTP {s}): {}",
+                "Peek failed (HTTP {s}): {}",
                 error_detail(&resp.text().await.unwrap_or_default())
             ),
         }
     }
 
-    /// Rilascia il lock: il messaggio torna disponibile in coda.
+    /// Release the lock: the message becomes available in the queue again.
     pub async fn unlock(&self, location: &str) -> Result<()> {
         self.lock_op(Method::PUT, location).await
     }
 
-    /// Completa (elimina) un messaggio bloccato.
+    /// Complete (delete) a locked message.
     pub async fn delete_locked(&self, location: &str) -> Result<()> {
         self.lock_op(Method::DELETE, location).await
     }
@@ -246,14 +484,14 @@ impl AzureClient {
         let s = resp.status();
         if !s.is_success() {
             bail!(
-                "{method} fallito (HTTP {s}): {}",
+                "{method} failed (HTTP {s}): {}",
                 error_detail(&resp.text().await.unwrap_or_default())
             );
         }
         Ok(())
     }
 
-    /// Purge distruttivo via AMQP in batch, sia della subscription sia della DLQ.
+    /// Destructive AMQP batch purge of either the subscription or its DLQ.
     pub async fn purge(
         &self,
         topic: &str,
@@ -288,7 +526,7 @@ async fn parse_message(resp: Response) -> Result<LockedMessage> {
     let location = headers
         .get("location")
         .and_then(|v| v.to_str().ok())
-        .context("Header Location mancante nella risposta")?
+        .context("Missing Location header in response")?
         .to_string();
     let broker: serde_json::Map<String, serde_json::Value> = headers
         .get("brokerproperties")
@@ -357,8 +595,8 @@ fn json_to_string(v: &serde_json::Value) -> String {
     }
 }
 
-/// Parsing generico di un feed Atom: per ogni `<entry>` restituisce
-/// la mappa `local-name -> testo` (prima occorrenza).
+/// Generic Atom feed parser: returns a map of `local-name -> text`
+/// (first occurrence) for each `<entry>`.
 pub fn parse_feed(xml: &str) -> Result<Vec<HashMap<String, String>>> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -394,14 +632,14 @@ pub fn parse_feed(xml: &str) -> Result<Vec<HashMap<String, String>>> {
     Ok(entries)
 }
 
-/// Estrae un messaggio leggibile da una risposta d'errore Azure (XML o HTML).
+/// Extract a readable message from an Azure error response (XML or HTML).
 fn error_detail(body: &str) -> String {
     if let Some(start) = body.find("<Detail>")
         && let Some(end) = body[start..].find("</Detail>")
     {
         return collapse_ws(&body[start + 8..start + end]);
     }
-    // Pagine HTML (es. errori IIS): solo il testo del <body>.
+    // For HTML pages (e.g. IIS errors), keep only the text inside <body>.
     let content = body
         .to_ascii_lowercase()
         .find("<body")
@@ -482,5 +720,103 @@ mod tests {
         assert_eq!(e[0]["MessageCount"], "14");
         assert_eq!(e[0]["ActiveMessageCount"], "2");
         assert_eq!(e[0]["DeadLetterMessageCount"], "12");
+    }
+
+    #[test]
+    fn validates_subscription_name() {
+        assert!(validate_subscription_name("my-sub_1.test").is_ok());
+        assert!(validate_subscription_name("").is_err());
+        assert!(validate_subscription_name(&"a".repeat(51)).is_err());
+        assert!(validate_subscription_name(&"a".repeat(50)).is_ok());
+        assert!(validate_subscription_name("bad/name").is_err());
+        assert!(validate_subscription_name("bad name").is_err());
+        assert!(validate_subscription_name("bad?name").is_err());
+    }
+
+    #[test]
+    fn builds_subscription_xml_in_schema_order() {
+        let xml = build_subscription_xml(&SubscriptionOptions {
+            lock_duration: Some("PT1M".into()),
+            requires_session: true,
+            default_message_ttl: Some("P14D".into()),
+            dead_lettering_on_message_expiration: true,
+            dead_lettering_on_filter_evaluation_exceptions: Some(true),
+            max_delivery_count: Some(5),
+            enable_batched_operations: Some(true),
+            status: Some("Active".into()),
+            forward_to: Some("target-queue".into()),
+            user_metadata: Some("meta".into()),
+            forward_dead_lettered_messages_to: Some("dlq-queue".into()),
+            auto_delete_on_idle: Some("P10675199DT2H48M5.4775807S".into()),
+        });
+        let positions = [
+            xml.find("<LockDuration>PT1M</LockDuration>").unwrap(),
+            xml.find("<RequiresSession>true</RequiresSession>").unwrap(),
+            xml.find("<DefaultMessageTimeToLive>P14D</DefaultMessageTimeToLive>")
+                .unwrap(),
+            xml.find("<DeadLetteringOnMessageExpiration>true</DeadLetteringOnMessageExpiration>")
+                .unwrap(),
+            xml.find("<DeadLetteringOnFilterEvaluationExceptions>true</DeadLetteringOnFilterEvaluationExceptions>")
+                .unwrap(),
+            xml.find("<MaxDeliveryCount>5</MaxDeliveryCount>").unwrap(),
+            xml.find("<EnableBatchedOperations>true</EnableBatchedOperations>")
+                .unwrap(),
+            xml.find("<Status>Active</Status>").unwrap(),
+            xml.find("<ForwardTo>target-queue</ForwardTo>").unwrap(),
+            xml.find("<UserMetadata>meta</UserMetadata>").unwrap(),
+            xml.find("<ForwardDeadLetteredMessagesTo>dlq-queue</ForwardDeadLetteredMessagesTo>")
+                .unwrap(),
+            xml.find("<AutoDeleteOnIdle>P10675199DT2H48M5.4775807S</AutoDeleteOnIdle>")
+                .unwrap(),
+        ];
+        assert!(positions.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn builds_minimal_subscription_xml() {
+        let xml = build_subscription_xml(&SubscriptionOptions::default());
+        assert!(!xml.contains("<LockDuration>"));
+        assert!(!xml.contains("<DefaultMessageTimeToLive>"));
+        assert!(!xml.contains("<MaxDeliveryCount>"));
+        assert!(xml.contains("<RequiresSession>false</RequiresSession>"));
+        assert!(
+            xml.contains("<DeadLetteringOnMessageExpiration>false</DeadLetteringOnMessageExpiration>")
+        );
+    }
+
+    #[test]
+    fn parses_subscription_options_from_entry() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom">
+  <title type="text">worker</title>
+  <content type="application/xml">
+    <SubscriptionDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
+      <LockDuration>PT2M</LockDuration>
+      <RequiresSession>true</RequiresSession>
+      <DefaultMessageTimeToLive>P7D</DefaultMessageTimeToLive>
+      <DeadLetteringOnMessageExpiration>true</DeadLetteringOnMessageExpiration>
+      <DeadLetteringOnFilterEvaluationExceptions>false</DeadLetteringOnFilterEvaluationExceptions>
+      <MaxDeliveryCount>15</MaxDeliveryCount>
+      <EnableBatchedOperations>true</EnableBatchedOperations>
+      <Status>Active</Status>
+      <ForwardTo>dest</ForwardTo>
+      <UserMetadata>team-a</UserMetadata>
+      <AutoDeleteOnIdle>PT1H</AutoDeleteOnIdle>
+    </SubscriptionDescription>
+  </content>
+</entry>"#;
+        let opts = parse_subscription_options(xml).unwrap();
+        assert_eq!(opts.lock_duration.as_deref(), Some("PT2M"));
+        assert!(opts.requires_session);
+        assert_eq!(opts.default_message_ttl.as_deref(), Some("P7D"));
+        assert!(opts.dead_lettering_on_message_expiration);
+        assert_eq!(opts.dead_lettering_on_filter_evaluation_exceptions, Some(false));
+        assert_eq!(opts.max_delivery_count, Some(15));
+        assert_eq!(opts.enable_batched_operations, Some(true));
+        assert_eq!(opts.status.as_deref(), Some("Active"));
+        assert_eq!(opts.forward_to.as_deref(), Some("dest"));
+        assert_eq!(opts.user_metadata.as_deref(), Some("team-a"));
+        assert_eq!(opts.forward_dead_lettered_messages_to, None);
+        assert_eq!(opts.auto_delete_on_idle.as_deref(), Some("PT1H"));
     }
 }

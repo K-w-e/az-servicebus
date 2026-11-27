@@ -20,17 +20,17 @@ use worker::{Command, Event};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Lettura config prima di entrare in modalità TUI.
+    // Load the config before entering TUI mode.
     let config = config::load()?;
 
     let (tx_cmd, rx_cmd) = mpsc::unbounded_channel::<Command>();
     let (tx_evt, rx_evt) = mpsc::unbounded_channel::<Event>();
     tokio::spawn(worker::run(rx_cmd, tx_evt));
 
-    // `ratatui::init` installa un panic hook che ripristina il terminale
-    // (disable_raw_mode + LeaveAlternateScreen) prima di stampare il panic.
+    // `ratatui::init` installs a panic hook that restores the terminal
+    // (disable_raw_mode + LeaveAlternateScreen) before printing the panic.
     let mut terminal = ratatui::init();
-    // Anche la cattura del mouse va disattivata in caso di panic.
+    // Mouse capture must also be disabled in case of a panic.
     let ratatui_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -83,7 +83,7 @@ async fn run(
                     dirty = true;
                 }
                 Some(Ok(TermEvent::Mouse(m))) => {
-                    // I movimenti del mouse non richiedono redraw.
+                    // Mouse movement does not require a redraw.
                     if !matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
                         send(app.on_mouse(m));
                         dirty = true;
@@ -96,7 +96,7 @@ async fn run(
             },
             Some(ev) = rx.recv() => {
                 send(app.on_backend(ev));
-                // Drena gli eventi in coda per ridurre i redraw.
+                // Drain queued events to reduce redraws.
                 while let Ok(ev) = rx.try_recv() {
                     send(app.on_backend(ev));
                 }

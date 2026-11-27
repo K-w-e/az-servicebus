@@ -1,8 +1,9 @@
-//! Backend asincrono: riceve `Command` dalla UI ed emette `Event`.
-//! Tutto l'I/O (rete, file system) avviene qui, mai nel thread di rendering.
+//! Asynchronous backend: receives `Command`s from the UI and emits `Event`s.
+//! All I/O (network and filesystem) happens here, never on the rendering thread.
 
 use crate::azure::{
-    AzureClient, ConnectionInfo, LockedMessage, Message, SubscriptionInfo, entity_path,
+    AzureClient, ConnectionInfo, LockedMessage, Message, SubscriptionInfo, SubscriptionOptions,
+    entity_path,
 };
 use crate::config::{self, Config, Profile};
 use anyhow::Result;
@@ -10,7 +11,7 @@ use futures::future::join_all;
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-/// Numero massimo di messaggi scansionati per trovare quello da eliminare.
+/// Maximum number of messages to scan when locating one to delete.
 const DELETE_SCAN_LIMIT: usize = 1000;
 
 #[derive(Debug)]
@@ -20,6 +21,24 @@ pub enum Command {
     LoadTopics,
     LoadSubscriptions {
         topic: String,
+    },
+    LoadSubscriptionDetails {
+        topic: String,
+        name: String,
+    },
+    CreateSubscription {
+        topic: String,
+        name: String,
+        options: SubscriptionOptions,
+    },
+    UpdateSubscription {
+        topic: String,
+        name: String,
+        options: SubscriptionOptions,
+    },
+    DeleteSubscription {
+        topic: String,
+        name: String,
     },
     LoadMessages {
         topic: String,
@@ -60,6 +79,27 @@ pub enum Event {
         generation: u64,
         topic: String,
         subs: Vec<SubscriptionInfo>,
+    },
+    SubscriptionDetails {
+        generation: u64,
+        topic: String,
+        name: String,
+        options: SubscriptionOptions,
+    },
+    SubscriptionCreated {
+        generation: u64,
+        topic: String,
+        name: String,
+    },
+    SubscriptionUpdated {
+        generation: u64,
+        topic: String,
+        name: String,
+    },
+    SubscriptionDeleted {
+        generation: u64,
+        topic: String,
+        name: String,
     },
     Messages {
         generation: u64,
@@ -120,7 +160,7 @@ pub async fn run(mut rx: UnboundedReceiver<Command>, tx: UnboundedSender<Event>)
                     if let Err(e) = config::save(&cfg).await {
                         let _ = tx.send(Event::Error {
                             messages_op: false,
-                            msg: format!("Salvataggio config: {e:#}"),
+                            msg: format!("Config save failed: {e:#}"),
                         });
                     }
                 });
@@ -135,7 +175,7 @@ pub async fn run(mut rx: UnboundedReceiver<Command>, tx: UnboundedSender<Event>)
                 let Some(c) = client.clone() else {
                     let _ = tx.send(Event::Error {
                         messages_op,
-                        msg: "Nessun profilo attivo".into(),
+                        msg: "No active profile".into(),
                     });
                     continue;
                 };
@@ -172,6 +212,47 @@ async fn handle(
                 subs,
             });
         }
+        Command::LoadSubscriptionDetails { topic, name } => {
+            let options = c.get_subscription(&topic, &name).await?;
+            let _ = tx.send(Event::SubscriptionDetails {
+                generation,
+                topic,
+                name,
+                options,
+            });
+        }
+        Command::CreateSubscription {
+            topic,
+            name,
+            options,
+        } => {
+            c.create_subscription(&topic, &name, &options).await?;
+            let _ = tx.send(Event::SubscriptionCreated {
+                generation,
+                topic,
+                name,
+            });
+        }
+        Command::UpdateSubscription {
+            topic,
+            name,
+            options,
+        } => {
+            c.update_subscription(&topic, &name, &options).await?;
+            let _ = tx.send(Event::SubscriptionUpdated {
+                generation,
+                topic,
+                name,
+            });
+        }
+        Command::DeleteSubscription { topic, name } => {
+            c.delete_subscription(&topic, &name).await?;
+            let _ = tx.send(Event::SubscriptionDeleted {
+                generation,
+                topic,
+                name,
+            });
+        }
         Command::LoadMessages {
             topic,
             sub,
@@ -179,7 +260,7 @@ async fn handle(
             max,
         } => {
             let path = entity_path(&topic, &sub, dlq);
-            // Peek-lock di N messaggi, poi rilascio immediato di tutti i lock.
+            // Peek-lock N messages, then immediately release all locks.
             let mut locked: Vec<LockedMessage> = Vec::new();
             let mut err = None;
             while locked.len() < max {
@@ -227,7 +308,7 @@ async fn handle(
                     Ok(Some(m)) => {
                         locked.push(m);
                         let _ = tx.send(Event::Progress(format!(
-                            "Ricerca messaggio {seq}… ({})",
+                            "Searching for message {seq}… ({})",
                             locked.len()
                         )));
                     }
@@ -252,9 +333,7 @@ async fn handle(
         Command::Purge { topic, sub, dlq } => {
             let count = c
                 .purge(&topic, &sub, dlq, |count| {
-                    let _ = tx.send(Event::Progress(format!(
-                        "Purge: {count} messaggi eliminati…"
-                    )));
+                    let _ = tx.send(Event::Progress(format!("Purge: {count} messages deleted…")));
                 })
                 .await?;
             let _ = tx.send(Event::Purged {
@@ -271,6 +350,6 @@ async fn handle(
 }
 
 async fn unlock_all(c: &AzureClient, locked: &[LockedMessage]) {
-    // Errori ignorati: in ogni caso il lock scade dopo LockDuration.
+    // Ignore errors: the lock expires after LockDuration in any case.
     join_all(locked.iter().map(|m| c.unlock(&m.location))).await;
 }

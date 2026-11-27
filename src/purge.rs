@@ -1,4 +1,4 @@
-//! Purge AMQP receive-and-delete: nessuna richiesta HTTP per singolo messaggio.
+//! AMQP receive-and-delete purge: no HTTP request per message.
 
 use crate::azure::ConnectionInfo;
 use anyhow::{Context, Result};
@@ -21,13 +21,13 @@ fn receiver_options(dlq: bool) -> ServiceBusReceiverOptions {
         } else {
             SubQueue::None
         },
-        // In ReceiveAndDelete il prefetch eliminerebbe messaggi non ancora conteggiati.
+        // In ReceiveAndDelete mode, prefetch would delete messages before they are counted.
         prefetch_count: 0,
         ..Default::default()
     }
 }
 
-// Astrazione minima per verificare il ciclo senza collegarsi a un namespace reale.
+// Minimal abstraction for testing the loop without connecting to a real namespace.
 trait BatchReceiver {
     fn receive_batch(&mut self) -> impl Future<Output = Result<usize>> + Send;
 }
@@ -62,7 +62,7 @@ async fn drain_batches(
                 if received > 0 {
                     count += received;
                     progress(count);
-                    // Un batch parziale NON implica che la coda sia vuota.
+                    // A partial batch does NOT mean the queue is empty.
                     if error.is_none() {
                         pending.push(receive_batch(receiver));
                     }
@@ -72,14 +72,14 @@ async fn drain_batches(
                 if error.is_none() {
                     error = Some(err);
                 }
-                // Non avviare altre ricezioni, ma attendere quelle già in corso:
-                // cancellarle potrebbe perdere il conteggio di messaggi eliminati.
+                // Do not start more receives, but wait for those already in progress:
+                // cancelling them could lose the count of deleted messages.
             }
         }
     }
     match error {
         Some(err) => Err(err).with_context(|| {
-            format!("Purge interrotto dopo {count} messaggi confermati eliminati; una ricezione fallita potrebbe averne eliminati altri")
+            format!("Purge interrupted after {count} confirmed deletions; a failed receive may have deleted additional messages")
         }),
         None => Ok(count),
     }
@@ -99,39 +99,39 @@ pub async fn purge(
     let mut client = ServiceBusClient::new_from_connection_string(
         connection_string,
         ServiceBusClientOptions {
-            // Stessa porta del client HTTPS, senza richiedere l'apertura della 5671.
+            // Same port as the HTTPS client; no need to open port 5671.
             transport_type: ServiceBusTransportType::AmqpWebSocket,
             ..Default::default()
         },
     )
     .await
-    .context("Connessione AMQP per il purge fallita")?;
+    .context("AMQP connection for purge failed")?;
 
     let mut receivers = Vec::with_capacity(RECEIVER_COUNT);
     let result: Result<usize> = async {
-        // Aprire tutti i receiver prima di iniziare le ricezioni distruttive.
+        // Open all receivers before starting destructive receives.
         for _ in 0..RECEIVER_COUNT {
             receivers.push(
                 client
                     .create_receiver_for_subscription(topic, sub, receiver_options(dlq))
                     .await
-                    .context("Apertura receiver AMQP per il purge fallita")?,
+                    .context("Failed to open AMQP receiver for purge")?,
             );
         }
         drain_batches(&mut receivers, progress).await
     }
     .await;
-    // Chiudere tutti i receiver anche in caso di apertura parziale o errore,
-    // senza nascondere l'errore originale. Nessun task rimane in background.
+    // Close all receivers even after a partial open or an error,
+    // without hiding the original error. No tasks are left running in the background.
     let receiver_closes =
         futures::future::join_all(receivers.into_iter().map(ServiceBusReceiver::dispose)).await;
     let client_close = client.dispose().await;
     let count = result?;
     for close in receiver_closes {
-        close.with_context(|| format!("{count} messaggi eliminati; chiusura receiver fallita"))?;
+        close.with_context(|| format!("{count} messages deleted; receiver shutdown failed"))?;
     }
     client_close
-        .with_context(|| format!("{count} messaggi eliminati; chiusura client AMQP fallita"))?;
+        .with_context(|| format!("{count} messages deleted; AMQP client shutdown failed"))?;
     Ok(count)
 }
 
@@ -144,7 +144,9 @@ mod tests {
 
     impl BatchReceiver for FakeReceiver {
         async fn receive_batch(&mut self) -> Result<usize> {
-            self.0.pop_front().expect("Ricezione inattesa dopo la fine")
+            self.0
+                .pop_front()
+                .expect("Unexpected receive after completion")
         }
     }
 
@@ -172,7 +174,7 @@ mod tests {
     async fn empty_queue_reports_zero_without_progress() {
         let mut receiver = FakeReceiver([Ok(0)].into());
         let count = drain_batches(std::slice::from_mut(&mut receiver), |_| {
-            panic!("Progresso inatteso")
+            panic!("Unexpected progress")
         })
         .await
         .unwrap();
@@ -220,15 +222,15 @@ mod tests {
         async fn receive_batch(&mut self) -> Result<usize> {
             self.calls += 1;
             if self.calls > 1 {
-                assert!(!self.stop_after_first, "Nuova ricezione dopo un errore");
+                assert!(!self.stop_after_first, "Unexpected receive after an error");
                 return Ok(0);
             }
-            // Se i receiver fossero sequenziali, questo test andrebbe in timeout.
+            // If receivers ran sequentially, this test would time out.
             self.barrier.wait().await;
             if self.fail {
-                anyhow::bail!("rete interrotta");
+                anyhow::bail!("network interrupted");
             }
-            // Completare dopo il receiver fallito per verificarne il conteggio.
+            // Complete after the failed receiver to verify the count.
             tokio::task::yield_now().await;
             Ok(7)
         }
@@ -255,7 +257,7 @@ mod tests {
             drain_batches(&mut receivers, |n| progress.push(n)),
         )
         .await
-        .expect("Le ricezioni devono essere concorrenti")
+        .expect("Receives must run concurrently")
         .unwrap();
         assert_eq!(count, 28);
         assert_eq!(progress, [7, 14, 21, 28]);
@@ -271,25 +273,26 @@ mod tests {
             drain_batches(&mut receivers, |n| progress.push(n)),
         )
         .await
-        .expect("Le ricezioni in corso devono terminare")
+        .expect("In-flight receives must finish")
         .unwrap_err();
         assert_eq!(progress, [7, 14]);
         assert!(receivers.iter().all(|receiver| receiver.calls == 1));
         let message = format!("{err:#}");
-        assert!(message.contains("14 messaggi"));
-        assert!(message.contains("rete interrotta"));
+        assert!(message.contains("14 confirmed deletions"));
+        assert!(message.contains("network interrupted"));
     }
 
     #[tokio::test]
     async fn error_preserves_partial_count_and_stops() {
-        let mut receiver = FakeReceiver([Ok(100), Err(anyhow::anyhow!("rete interrotta"))].into());
+        let mut receiver =
+            FakeReceiver([Ok(100), Err(anyhow::anyhow!("network interrupted"))].into());
         let mut progress = Vec::new();
         let err = drain_batches(std::slice::from_mut(&mut receiver), |n| progress.push(n))
             .await
             .unwrap_err();
         assert_eq!(progress, [100]);
         let message = format!("{err:#}");
-        assert!(message.contains("100 messaggi"));
-        assert!(message.contains("rete interrotta"));
+        assert!(message.contains("100 confirmed deletions"));
+        assert!(message.contains("network interrupted"));
     }
 }

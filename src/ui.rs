@@ -17,7 +17,7 @@ const STATUS_PREFIX: &str = " Status: ";
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.hit = HitAreas::default();
 
-    // La barra di stato cresce (fino a 4 righe) per mostrare messaggi lunghi.
+    // The status bar expands (up to 4 lines) to display long messages.
     let width = f.area().width.max(1) as usize;
     let status_len = STATUS_PREFIX.chars().count() + 2 + app.status.chars().count();
     let status_h = status_len.div_ceil(width).clamp(1, 4) as u16;
@@ -42,7 +42,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .areas(top);
 
     let focus = match app.focus {
-        AppFocus::ProfilesModal | AppFocus::DeleteConfirmModal => app.base_focus,
+        AppFocus::ProfilesModal | AppFocus::SubscriptionModal | AppFocus::DeleteConfirmModal => {
+            app.base_focus
+        }
         f => f,
     };
 
@@ -59,6 +61,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match app.focus {
         AppFocus::ProfilesModal => draw_profiles(f, app),
+        AppFocus::SubscriptionModal => draw_subscription_modal(f, app),
         AppFocus::DeleteConfirmModal => draw_confirm(f, app),
         _ => {}
     }
@@ -91,7 +94,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let profile = app.profile_name.clone().unwrap_or_else(|| "-".into());
     let host = app.host.clone().unwrap_or_default();
     let spans = vec![
-        Span::styled(" az-servicebus ", Style::new().bg(ACCENT).fg(Color::Black).bold()),
+        Span::styled(
+            " az-servicebus ",
+            Style::new().bg(ACCENT).fg(Color::Black).bold(),
+        ),
         Span::raw(" │ Profile: "),
         Span::styled(
             format!("[{profile}]"),
@@ -189,13 +195,13 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
 
     if app.messages.is_empty() {
         let hint = if app.messages_busy {
-            "Caricamento…"
+            "Loading…"
         } else if app.selected_sub().is_none() {
-            "Seleziona una subscription"
+            "Select a subscription"
         } else if app.messages_key.is_some() {
-            "Nessun messaggio"
+            "No messages"
         } else {
-            "[Enter] / [r] per fare peek dei messaggi\n[t] per alternare Active / DLQ"
+            "[Enter] / [r] to peek messages\n[t] to toggle Active / DLQ"
         };
         let p = Paragraph::new(hint)
             .fg(Color::DarkGray)
@@ -301,7 +307,7 @@ fn detail_text(m: &Message) -> Text<'static> {
     Text::from(lines)
 }
 
-/// Tasto simulato dal click su un'etichetta del footer.
+/// Key simulated by clicking a footer label.
 fn footer_code(k: &str) -> Option<KeyCode> {
     match k {
         "Tab" => Some(KeyCode::Tab),
@@ -315,19 +321,38 @@ fn footer_code(k: &str) -> Option<KeyCode> {
 fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
     let keys: &[(&str, &str)] = match app.focus {
         AppFocus::ProfilesModal if app.profile_form.is_some() => &[
-            ("Tab", "Campo"),
-            ("Enter", "Salva"),
-            ("Ctrl-U", "Pulisci"),
-            ("Esc", "Annulla"),
+            ("Tab", "Field"),
+            ("Enter", "Save"),
+            ("Ctrl-U", "Clear"),
+            ("Esc", "Cancel"),
         ],
         AppFocus::ProfilesModal => &[
             ("j/k", "Navigate"),
-            ("Enter", "Attiva"),
-            ("a", "Aggiungi"),
-            ("x", "Rimuovi"),
-            ("Esc", "Chiudi"),
+            ("Enter", "Activate"),
+            ("a", "Add"),
+            ("x", "Remove"),
+            ("Esc", "Close"),
         ],
-        AppFocus::DeleteConfirmModal => &[("y", "Conferma"), ("N", "Annulla")],
+        AppFocus::SubscriptionModal => {
+            if app.sub_form.as_ref().is_some_and(|f| f.is_edit()) {
+                &[
+                    ("Tab", "Field"),
+                    ("Space", "Toggle"),
+                    ("Enter", "Save"),
+                    ("Ctrl-U", "Clear"),
+                    ("Esc", "Cancel"),
+                ]
+            } else {
+                &[
+                    ("Tab", "Field"),
+                    ("Space", "Toggle"),
+                    ("Enter", "Create"),
+                    ("Ctrl-U", "Clear"),
+                    ("Esc", "Cancel"),
+                ]
+            }
+        }
+        AppFocus::DeleteConfirmModal => &[("y", "Confirm"), ("N", "Cancel")],
         AppFocus::MessageDetail => &[
             ("Tab", "Focus"),
             ("j/k", "Scroll"),
@@ -343,6 +368,8 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
             ("j/k", "Navigate"),
             ("Enter", "Open"),
             ("t", "Active/DLQ"),
+            ("n", "New Sub"),
+            ("e", "Edit Sub"),
             ("p", "Profiles"),
             ("d", "Delete"),
             ("P", "Purge"),
@@ -393,7 +420,7 @@ fn draw_profiles(f: &mut Frame, app: &mut App) {
         let area = centered(f.area(), width, 11);
         f.render_widget(Clear, area);
         app.hit.modal = area;
-        // Righe 2 e 3 dell'area interna: campi Nome e Connection string.
+        // Rows 2 and 3 of the inner area: Name and Connection string fields.
         let row = |n: u16| Rect::new(area.x + 1, area.y + 1 + n, area.width.saturating_sub(2), 1);
         app.hit.form_fields = [row(2), row(3)];
         let inner_w = width.saturating_sub(16) as usize;
@@ -415,10 +442,10 @@ fn draw_profiles(f: &mut Frame, app: &mut App) {
             ])
         };
         let mut lines = vec![
-            Line::from("Nuovo profilo di connessione").bold(),
+            Line::from("New connection profile").bold(),
             Line::from(""),
-            field("Nome", &form.name, form.field == 0, false),
-            field("Conn. str.", &form.conn, form.field == 1, true),
+            field("Name", &form.name, form.field == 0, false),
+            field("Conn. string", &form.conn, form.field == 1, true),
             Line::from(""),
             Line::from("Endpoint=sb://<ns>.servicebus.windows.net/;SharedAccessKeyName=…;SharedAccessKey=…")
                 .fg(Color::DarkGray),
@@ -447,7 +474,7 @@ fn draw_profiles(f: &mut Frame, app: &mut App) {
         .map(|p| {
             let host = crate::azure::ConnectionInfo::parse(&p.connection_string)
                 .map(|c| c.host)
-                .unwrap_or_else(|_| "connection string non valida".into());
+                .unwrap_or_else(|_| "invalid connection string".into());
             let marker = if active.as_deref() == Some(p.name.as_str()) {
                 "● "
             } else {
@@ -467,6 +494,135 @@ fn draw_profiles(f: &mut Frame, app: &mut App) {
     f.render_stateful_widget(list, area, &mut app.profiles_state);
 }
 
+fn draw_subscription_modal(f: &mut Frame, app: &mut App) {
+    let Some(form) = &app.sub_form else {
+        return;
+    };
+    let is_edit = form.is_edit();
+    let width = f.area().width.saturating_sub(4).min(76);
+    let area = centered(f.area(), width, 15);
+    f.render_widget(Clear, area);
+    app.hit.modal = area;
+
+    // Rows 2..=7 of the inner area correspond to the 6 form fields.
+    let row = |n: u16| Rect::new(area.x + 1, area.y + 1 + n, area.width.saturating_sub(2), 1);
+    app.hit.sub_form_fields = [row(2), row(3), row(4), row(5), row(6), row(7)];
+
+    let label_w = 24usize;
+    let inner_w = (width as usize).saturating_sub(label_w + 4);
+    let text_field = |label: &str, value: &str, active: bool, read_only: bool| {
+        let n = value.chars().count();
+        let shown: String = value.chars().skip(n.saturating_sub(inner_w)).collect();
+        let (label_style, val_style, suffix) = if read_only {
+            (
+                Style::new().fg(Color::DarkGray),
+                Style::new().fg(Color::DarkGray),
+                " (immutable)",
+            )
+        } else if active {
+            (
+                Style::new().fg(ACCENT).bold(),
+                Style::new().fg(Color::Yellow),
+                "▏",
+            )
+        } else {
+            (Style::new().fg(ACCENT).bold(), Style::new(), "")
+        };
+        Line::from(vec![
+            Span::styled(format!("{label:<label_w$}"), label_style),
+            Span::styled(format!("{shown}{suffix}"), val_style),
+        ])
+    };
+    let bool_field = |label: &str, checked: bool, active: bool, read_only: bool| {
+        let box_str = if checked { "[x] Yes" } else { "[ ] No" };
+        let (label_style, val_style, suffix) = if read_only {
+            (
+                Style::new().fg(Color::DarkGray),
+                Style::new().fg(Color::DarkGray),
+                " (immutable)",
+            )
+        } else if active {
+            (
+                Style::new().fg(ACCENT).bold(),
+                Style::new().fg(Color::Yellow).bold(),
+                "",
+            )
+        } else if checked {
+            (
+                Style::new().fg(ACCENT).bold(),
+                Style::new().fg(Color::Green),
+                "",
+            )
+        } else {
+            (
+                Style::new().fg(ACCENT).bold(),
+                Style::new().fg(Color::Gray),
+                "",
+            )
+        };
+        Line::from(vec![
+            Span::styled(format!("{label:<label_w$}"), label_style),
+            Span::styled(format!("{box_str}{suffix}"), val_style),
+        ])
+    };
+
+    let hint = if is_edit {
+        "ISO-8601 durations: PT30S, PT1M, P14D — Space toggles checkboxes, Enter saves"
+    } else {
+        "ISO-8601 durations: PT30S, PT1M, P14D — Space toggles checkboxes, Enter creates"
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("Topic: ").bold(),
+            Span::styled(form.topic.clone(), Style::new().fg(Color::Yellow).bold()),
+        ]),
+        Line::from(""),
+        text_field("Name", &form.name, form.field == 0, is_edit),
+        text_field(
+            "Max delivery count",
+            &form.max_delivery_count,
+            form.field == 1,
+            false,
+        ),
+        text_field("Lock duration", &form.lock_duration, form.field == 2, false),
+        text_field(
+            "Default message TTL",
+            &form.default_message_ttl,
+            form.field == 3,
+            false,
+        ),
+        bool_field(
+            "DLQ on msg expiration",
+            form.dead_letter_on_expiration,
+            form.field == 4,
+            false,
+        ),
+        bool_field(
+            "Requires session",
+            form.requires_session,
+            form.field == 5,
+            is_edit,
+        ),
+        Line::from(""),
+        Line::from(hint).fg(Color::DarkGray),
+    ];
+    if let Some(e) = &form.error {
+        lines.push(Line::from(e.clone()).fg(Color::Red));
+    }
+
+    let title = if is_edit {
+        "Edit Subscription"
+    } else {
+        "New Subscription"
+    };
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(modal_block(title, ACCENT))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn draw_confirm(f: &mut Frame, app: &mut App) {
     let text = match &app.pending_action {
         Some(PendingAction::DeleteMessage {
@@ -475,17 +631,22 @@ fn draw_confirm(f: &mut Frame, app: &mut App) {
             dlq,
             seq,
         }) => vec![
-            Line::from(format!("Eliminare definitivamente il messaggio {seq}?")).bold(),
+            Line::from(format!("Permanently delete message {seq}?")).bold(),
             Line::from(format!("{topic}/{sub}{}", if *dlq { " (DLQ)" } else { "" }))
+                .fg(Color::Gray),
+        ],
+        Some(PendingAction::DeleteSubscription { topic, sub }) => vec![
+            Line::from(format!("Permanently delete subscription '{sub}'?")).bold(),
+            Line::from(format!("Topic: {topic} (including all active & DLQ messages)"))
                 .fg(Color::Gray),
         ],
         Some(PendingAction::Purge { topic, sub, dlq }) => vec![
             Line::from(format!(
-                "Eliminare TUTTI i messaggi {}?",
+                "Delete ALL {} messages?",
                 if *dlq {
-                    "della Dead-Letter Queue"
+                    "in the Dead-Letter Queue"
                 } else {
-                    "attivi"
+                    "active"
                 }
             ))
             .bold(),
@@ -496,13 +657,13 @@ fn draw_confirm(f: &mut Frame, app: &mut App) {
     let mut lines = text;
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::raw("Operazione irreversibile. Confermi? "),
+        Span::raw("This action is irreversible. Confirm? "),
         Span::styled("[y/N]", Style::new().fg(Color::Yellow).bold()),
     ]));
     let area = centered(f.area(), f.area().width.saturating_sub(4).min(64), 9);
     f.render_widget(Clear, area);
     app.hit.modal = area;
-    let block = modal_block("Conferma", Color::Red);
+    let block = modal_block("Confirm", Color::Red);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -515,8 +676,8 @@ fn draw_confirm(f: &mut Frame, app: &mut App) {
         text_area,
     );
 
-    let yes = " Sì, elimina (y) ";
-    let no = " Annulla (N) ";
+    let yes = " Yes, delete (y) ";
+    let no = " Cancel (N) ";
     let [b_yes, b_no] = Layout::horizontal([
         Constraint::Length(yes.chars().count() as u16),
         Constraint::Length(no.chars().count() as u16),
